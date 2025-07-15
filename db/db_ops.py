@@ -228,40 +228,6 @@ def update_user_xbx_token(token: str) -> bool:
         return False
 
 
-def update_user_wx_token(wx_token: str) -> bool:
-    """
-    更新用户WX扫码Token
-    
-    更新用户的微信扫码token，用于微信授权认证。
-    
-    :param wx_token: 微信扫码token
-    :type wx_token: str
-    :return: 更新成功返回True，失败返回False
-    :rtype: bool
-    
-    Note:
-        - 专门用于微信扫码认证
-        - 从xbx-Authorization请求头获取并存储
-        - 用于后续接口调用的身份认证
-    """
-    logger.info("更新用户WX token")
-    
-    try:
-        with SessionLocal() as db:
-            user = db.query(User).first()
-            if user:
-                user.wx_token = wx_token
-                db.commit()
-                logger.info("用户WX token更新成功")
-                return True
-            else:
-                logger.error("用户不存在，无法更新WX token")
-                return False
-    except Exception as e:
-        logger.error(f"更新用户WX token失败: {e}")
-        return False
-
-
 def save_user_credentials(uuid: str, apikey: str) -> bool:
     """
     保存用户XBX系统凭据
@@ -483,6 +449,19 @@ def get_all_framework_status() -> List[Dict[str, Any]]:
             result = [orm_to_dict(s) for s in status_list]
             logger.info(f"成功获取框架状态信息，共{len(result)}个框架")
             return result
+    except Exception as e:
+        logger.error(f"获取所有框架状态失败: {e}")
+        return []
+
+
+def get_all_finished_framework_status() -> List[FrameworkStatus]:
+    logger.info("获取所有框架状态信息")
+
+    try:
+        with SessionLocal() as db:
+            status_list = db.query(FrameworkStatus).filter_by(status=StatusEnum.FINISHED).all()
+            logger.info(f"成功获取框架状态信息，共{len(status_list)}个框架")
+            return status_list
     except Exception as e:
         logger.error(f"获取所有框架状态失败: {e}")
         return []

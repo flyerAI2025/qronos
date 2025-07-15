@@ -66,7 +66,6 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True, comment="用户主键ID")
     uuid = Column(String(64), unique=True, comment="XBX系统用户UUID")
     apikey = Column(String(128), comment="XBX系统API密钥")
-    wx_token = Column(String(256), comment="WX扫码token")
     xbx_token = Column(String(256), comment="XBX系统访问token")
     token = Column(String(256), comment="本系统JWT token")
     secret = Column(String(64), unique=True, comment="Google Authenticator密钥")

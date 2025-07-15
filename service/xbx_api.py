@@ -35,7 +35,7 @@ from service.command import create_pm2_cfg
 from utils.constant import (
     api_qtcls_user_login_token_url, api_qtcls_data_client_basic_code_url, api_qtcls_data_coin_cap_hist_url,
     api_qtcls_user_info_url, api_qtcls_basic_code_download_ticket_url, api_qtcls_basic_code_download_link_url,
-    TMP_PATH, FRAMEWORK_TYPE, DATA_CENTER_ID, FRAMEWORK_ROOT_PATH,
+    TMP_PATH, FRAMEWORK_TYPE, DATA_CENTER_ID, FRAMEWORK_ROOT_PATH, api_qtcls_user_info_v2_url,
 )
 from db.db_ops import (
     get_user, save_user_credentials, update_user_xbx_token, save_framework_status, update_framework_status_and_path,
@@ -51,6 +51,7 @@ class TokenExpiredException(Exception):
     当检测到多次401错误且token刷新失败时抛出此异常。
     表示用户的apikey已过期，需要重新获取wx_token和更新用户凭据。
     """
+
     def __init__(self, message="Token已过期，需要重新认证"):
         self.message = message
         super().__init__(self.message)
@@ -208,7 +209,7 @@ class XbxAPI:
         self.apikey: Optional[str] = None
         self.token: Optional[str] = None
         self._auth_failure_count: int = 0  # 401认证失败计数器
-        self._max_auth_failures: int = 5   # 最大允许的认证失败次数
+        self._max_auth_failures: int = 5  # 最大允许的认证失败次数
         self._load_credentials()  # 从数据库加载用户凭据
         self._load_token()  # 从数据库加载token
 
@@ -317,7 +318,7 @@ class XbxAPI:
         if not self.uuid or not self.apikey:
             logger.warning("登录失败：缺少UUID或API密钥")
             return False
-        
+
         resp = requests.post(api_qtcls_user_login_token_url, data={"uuid": self.uuid, "api_key": self.apikey})
 
         if resp.status_code == 200 and resp.json().get("data"):
@@ -329,16 +330,17 @@ class XbxAPI:
         else:
             logger.error(f"登录失败，状态码: {resp.status_code}, 响应: {resp.text}")
             self._save_token("")  # 清空无效token
-            
+
             # 处理401认证失败
             if 400 <= resp.status_code < 500:
                 self._auth_failure_count += 1
                 logger.warning(f"检测到4xx认证失败，当前失败次数: {self._auth_failure_count}/{self._max_auth_failures}")
-                
+
                 if self._auth_failure_count >= self._max_auth_failures:
                     logger.error(f"连续{self._max_auth_failures}次认证失败，token已过期，需要重新获取用户凭据")
-                    raise TokenExpiredException(f"连续{self._max_auth_failures}次认证失败，apikey可能已过期，需要重新认证")
-            
+                    raise TokenExpiredException(
+                        f"连续{self._max_auth_failures}次认证失败，apikey可能已过期，需要重新认证")
+
             return False
 
     def _ensure_token(self):
@@ -353,10 +355,8 @@ class XbxAPI:
             该方法在所有需要token的API调用前被调用。
         """
         self._load_token()  # 重新加载token，确保是最新的
-        if not self.token:
-            logger.info("当前无有效token，尝试重新登录")
-            if not self.login():
-                raise TokenExpiredException("XBX API登录失败，无法获取有效token")
+        if not self.login():
+            raise TokenExpiredException("XBX API登录失败，无法获取有效token")
 
     def _handle_token_refresh(self, resp, params, url, method='GET'):
         """
@@ -384,7 +384,7 @@ class XbxAPI:
         """
         if 400 <= resp.status_code < 500:
             logger.info(f"检测到4xx状态码({resp.status_code})，尝试刷新token")
-            
+
             # 特别处理4xx错误
             self._auth_failure_count += 1
             logger.warning(f"检测到4xx认证失败，当前失败次数: {self._auth_failure_count}/{self._max_auth_failures}")
@@ -392,7 +392,7 @@ class XbxAPI:
             if self._auth_failure_count >= self._max_auth_failures:
                 logger.error(f"连续{self._max_auth_failures}次认证失败，token已过期，需要重新获取用户凭据")
                 raise TokenExpiredException(f"连续{self._max_auth_failures}次认证失败，apikey可能已过期，需要重新认证")
-            
+
             try:
                 if self.login():
                     params["token"] = self.token
@@ -690,36 +690,71 @@ class XbxAPI:
                 logger.error("市值数据下载失败")
             return success
         else:
-            logger.error(f"获取市值数据下载链接失败，状态码: {resp.status_code}")
+            logger.error(f"获取市值数据下载链接失败，状态码: {resp.status_code}, 返回结果: {resp.content}")
             return False
+
+    def get_user_info(self, authorization: str):
+        """
+        获取用户信息
+
+        根据参数，选择不同的方式获取用户的详细信息。
+
+        :return 用户信息
+        """
+        if authorization:
+            return self.get_user_info_by_authorization(authorization)
+        else:
+            return self.get_user_info_by_token()
 
     @staticmethod
     @retry_request()
-    def get_user_info(authorization: str, timeout: int = 10):
+    def get_user_info_by_authorization(authorization: str):
         """
         获取用户信息
-        
+
         使用授权token获取用户的详细信息。
-        
+
         :param authorization: 授权token
         :type authorization: str
-        :param timeout: 请求超时时间，默认10秒
-        :type timeout: int
         :return: 用户信息字典，失败返回None
         :rtype: dict or None
-        
+
         note:
             - 静态方法，不需要实例化
             - 用于验证用户身份和获取基本信息
             - 包含UUID、API密钥等关键信息
         """
         logger.info("获取用户信息")
-        resp = requests.post(api_qtcls_user_info_url, headers={"Authorization": authorization}, timeout=timeout)
+        resp = requests.post(api_qtcls_user_info_url, headers={"Authorization": authorization}, timeout=10)
         if resp.status_code == 200:
             logger.info("用户信息获取成功")
             return resp.json()
         else:
             logger.error(f"用户信息获取失败，状态码: {resp.status_code}")
+            return None
+
+    @retry_request()
+    def get_user_info_by_token(self):
+        """
+        获取用户信息v2
+
+        使用授权token获取用户的详细信息。
+
+        :return: 用户信息字典，失败返回None
+        :rtype: dict or None
+
+        note:
+            - 用于验证用户身份和获取基本信息
+            - 包含UUID、API密钥等关键信息
+        """
+        logger.info("获取用户信息v2")
+        self._ensure_token()
+        resp = requests.post(api_qtcls_user_info_v2_url, params={"token": self.token}, timeout=10)
+        if resp.status_code == 200:
+            logger.info("用户信息v2获取成功")
+            return resp.json()
+        else:
+            logger.error(f"用户信息获取v2失败，状态码: {resp.status_code}")
             return None
 
     @retry_request()

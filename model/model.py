@@ -1,4 +1,4 @@
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ class DataCenterCfgModel(BaseModel):
     use_api: UseApiModel
     data_api_uuid: Optional[str] = None
     data_api_key: Optional[str] = None
-    enabled_hour_offsets: list
+    enabled_hour_offsets: List[str]
     funding_rate: bool = True
     is_first: bool = True
 
@@ -55,24 +55,36 @@ class BasicCodeOperateModel(BaseModel):
 
 
 class AccountConfigModel(BaseModel):
-    account_type: AccountTypeEnum
     apiKey: Optional[str]
     secret: Optional[str]
+    account_type: AccountTypeEnum
+    seed_coins: Optional[List] = None  # 统一账户模式且存在底仓时，才会有配置
+    coin_margin: Optional[Dict] = {}
+    hour_offset: str = '0m'
+    order_spot_money_limit: int = 10
+    order_swap_money_limit: int = 5
+    max_one_order_amount: int = 100
+    twap_interval: int = 2
     if_use_bnb_burn: bool = True
     buy_bnb_value: int = 11
     if_transfer_bnb: bool = True
-    hour_offset: str
-    wechat_webhook_url: str
+    wechat_webhook_url: str = ''
 
 
 class AccountModel(BaseModel):
     framework_id: str
     account_name: str
     account_config: AccountConfigModel
+    strategy_name: Optional[str] = ''
+    strategy_config: Optional[Dict] = {}
+    strategy_pool: Optional[List] = []
+    min_kline_num: int = 168
     get_kline_num: int = 999
     leverage: int | float = 1
-    black_list: list = []
-    white_list: list = []
+    rebalance_mode: Optional[Dict] = None
+    black_list: List[str] = []
+    white_list: List[str] = []
+    is_lock: bool = False
 
 
 class ApiKeySecretModel(BaseModel):

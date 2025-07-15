@@ -21,6 +21,9 @@ api_qtcls_root_url = 'https://api.quantclass.cn'
 # 获取用户信息
 api_qtcls_user_info_url = f'{api_qtcls_root_url}/user/info'
 
+# 获取用户信息v2
+api_qtcls_user_info_v2_url = f'{api_qtcls_root_url}/user/info/v2'
+
 # 获取用户 token
 api_qtcls_user_login_token_url = f'{api_qtcls_root_url}/user/login/user_token'
 
@@ -49,7 +52,10 @@ PREFIX_FILE = get_file_path('data', 'prefix.txt')
 PORT_FILE = get_file_path('data', 'port.txt')
 
 # 上次确认的声明 code 文件
-CODE_FILE = get_file_path('data', 'code.txt')
+CACHE_CODE_FILE = get_file_path('data', 'code.txt')
+
+# 框架声明 code 文件
+LOCAL_CODE_FILE = get_file_path('code.txt')
 
 """
 框架 id 对应类型

@@ -53,7 +53,7 @@ from starlette.middleware.cors import CORSMiddleware
 from db.db import init_db
 from db.db_ops import (
     get_framework_status, get_all_framework_status, delete_framework_status, get_finished_data_center_status,
-    del_user_token, get_user, save_google_secret, update_user_wx_token
+    del_user_token, get_user, save_google_secret, get_all_finished_framework_status
 )
 from model.enum_kit import StatusEnum, UploadFolderEnum
 from model.model import (
@@ -62,14 +62,14 @@ from model.model import (
 )
 from service.basic_code import (
     generate_account_py_file_from_config, extract_variables_from_py,
-    generate_account_py_file_from_json
+    generate_account_py_file_from_json, process_framework_account_statistics
 )
 from service.command import (
     get_pm2_list, del_pm2, get_pm2_env
 )
 from service.xbx_api import XbxAPI, TokenExpiredException
 from utils.auth import google_login, AuthMiddleware
-from utils.constant import DATA_CENTER_ID, PREFIX, CODE_FILE
+from utils.constant import DATA_CENTER_ID, PREFIX, CACHE_CODE_FILE, LOCAL_CODE_FILE, SELECT_COIN_ID
 from utils.log_kit import get_logger
 
 # 初始化日志记录器
@@ -92,7 +92,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Refresh-Token", "xbx-Authorization"],  # 暴露token刷新头
+    expose_headers=["X-Refresh-Token"],  # 暴露token刷新头
 )
 
 
@@ -125,7 +125,7 @@ def declaration(code: str):
 
     try:
         # 读取系统预设的声明代码
-        with open("code.txt", "r", encoding="utf-8") as f:
+        with open(LOCAL_CODE_FILE, "r", encoding="utf-8") as f:
             local_code = f.read().strip()  # 去除可能的换行符
 
         logger.debug(f"系统声明代码: {local_code}")
@@ -135,9 +135,9 @@ def declaration(code: str):
 
         if is_match:
             # 验证成功，缓存代码到指定文件
-            CODE_FILE.write_text(code, encoding="utf-8")
-            logger.info(f"系统声明代码验证成功，代码匹配，已缓存到: {CODE_FILE}")
-            logger.info(f"缓存文件路径: {CODE_FILE.absolute()}")
+            CACHE_CODE_FILE.write_text(code, encoding="utf-8")
+            logger.info(f"系统声明代码验证成功，代码匹配，已缓存到: {CACHE_CODE_FILE}")
+            logger.info(f"缓存文件路径: {CACHE_CODE_FILE.absolute()}")
         else:
             logger.warning(f"系统声明代码验证失败，代码不匹配")
             logger.debug(f"期望代码内容: {local_code}")
@@ -187,18 +187,18 @@ def first():
         logger.info(f"首次使用状态检查: {is_first_use} (基于数据库用户记录)")
 
         # 读取系统预设的声明代码
-        with open("code.txt", "r", encoding="utf-8") as f:
+        with open(LOCAL_CODE_FILE, "r", encoding="utf-8") as f:
             local_code = f.read().strip()  # 去除可能的换行符
 
         # 读取缓存的确认声明代码
-        if CODE_FILE.exists():
-            with open(CODE_FILE, "r", encoding="utf-8") as f:
+        if CACHE_CODE_FILE.exists():
+            with open(CACHE_CODE_FILE, "r", encoding="utf-8") as f:
                 cache_code = f.read().strip()  # 去除可能的换行符
             logger.debug(f"缓存声明代码读取成功: {cache_code}")
         else:
             # 缓存文件不存在，说明用户从未成功验证过声明代码
             cache_code = ""
-            logger.info(f"缓存声明代码文件不存在: {CODE_FILE}，用户尚未验证声明代码")
+            logger.info(f"缓存声明代码文件不存在: {CACHE_CODE_FILE}，用户尚未验证声明代码")
 
         # 对比声明代码是否一致
         is_declaration = local_code == cache_code
@@ -258,16 +258,23 @@ def login(body: LoginRequest, response: Response):
             logger.warning("Google Secret Key已存在，拒绝重复绑定")
             return ResponseModel.error(msg="已经绑定过 secret，请勿重复绑定")
 
+        is_bind = False
         # 获取用户信息并添加wx_token到响应头
         user = get_user()
-        if user and user.wx_token:
-            response.headers["xbx-Authorization"] = user.wx_token
-            logger.info("wx_token已添加到响应头")
-        else:
-            logger.info("用户不存在或wx_token为空，跳过响应头设置")
+        if user:
+            # 没有 apikey， uuid， token，需要重新扫码
+            if not (user.apikey and user.apikey and user.xbx_token):
+                is_bind = False
+            else:
+                try:
+                    api = XbxAPI.get_instance()
+                    api._ensure_token()
+                    is_bind = True
+                except Exception as e:
+                    is_bind = False
 
         logger.info("用户登录成功，token已生成")
-        return ResponseModel.ok(data=data)
+        return ResponseModel.ok(data={**data, **{'is_bind': is_bind}})
 
     except Exception as e:
         logger.error(f"用户登录失败: {e}")
@@ -318,10 +325,6 @@ def user_info(request: Request, background_tasks: BackgroundTasks):
     authorization = request.headers.get("xbx-Authorization", None)
     logger.info(f"获取用户信息请求，token前缀: {authorization[:20] if authorization else 'None'}...")
 
-    if not authorization:
-        logger.warning("获取用户信息失败：缺少授权头")
-        return ResponseModel.error(code=444, msg="请扫描二维码绑定用户")
-
     try:
         api = XbxAPI.get_instance()
         data = api.get_user_info(authorization)
@@ -334,10 +337,6 @@ def user_info(request: Request, background_tasks: BackgroundTasks):
             if not api.login():
                 logger.error("XBX系统登录失败，uuid或apikey错误")
                 return ResponseModel.error(code=444, msg="系统认证失败，请重新扫描二维码绑定用户")
-
-            # 更新wx_token到数据库
-            update_user_wx_token(authorization)
-            logger.info("wx_token已更新到数据库")
 
             logger.info("XBX系统登录成功，启动数据中心下载任务")
             # 后台任务：下载最新数据中心代码
@@ -386,10 +385,11 @@ def get_basic_code():
 
         # 过滤掉数据中心框架
         data = result.get('data', [])
-        filtered_data = [item for item in data if item.get('id') != DATA_CENTER_ID]
+        filtered_data = [item for item in data if not item.get('id') in [DATA_CENTER_ID, SELECT_COIN_ID]]
 
         # 过滤版本列表，只保留time大于2025-06-01的版本（6月份更新的代码，配合当前框架可以使用）
-        time_threshold = "2025-06-01"
+        # 0.2.0版本，更新了账户统计接口，需要限制仓管框架版本必须要 1.3.4 版本, 2025-07-14
+        time_threshold = "2025-07-14"
         for framework in filtered_data:
             versions = framework.get('versions', [])
             # 过滤版本：只保留time大于threshold的版本
@@ -837,10 +837,10 @@ def basic_code_upload_file(framework_id: str, upload_folder: UploadFolderEnum, f
             filename = file.filename.split('/')[-1]
             logger.debug(f"处理文件: {file.filename} -> {filename}")
 
-            # 跳过__init__.py文件
+            # 跳过__init__.py文件 和 非py文件
             file_path = target_dir / filename
-            if file_path.stem == '__init__':
-                logger.debug(f"跳过__init__.py文件: {filename}")
+            if file_path.stem == '__init__' or file_path.suffix != '.py':
+                logger.debug(f"跳过__init__.py文件 和 不是 py 的脚本文件: {filename}")
                 continue
 
             # 确保目录存在
@@ -1016,6 +1016,12 @@ def basic_code_account(account_cfg: AccountModel):
                 account_cfg.account_config.apiKey = account_json['account_config']['apiKey']
             if account_json.get('account_config', {}).get('secret', ''):
                 account_cfg.account_config.secret = account_json['account_config']['secret']
+            if account_json.get('strategy_name', {}):
+                account_cfg.strategy_name = account_json['strategy_name']
+            if account_json.get('strategy_config', {}):
+                account_cfg.strategy_config = account_json['strategy_config']
+            if account_json.get('strategy_pool', {}):
+                account_cfg.strategy_pool = account_json['strategy_pool']
         account_json_path.write_text(
             json.dumps(account_cfg.model_dump(), ensure_ascii=False, indent=2))
         logger.info(f"JSON配置文件已保存: {account_json_path}")
@@ -1034,6 +1040,116 @@ def basic_code_account(account_cfg: AccountModel):
     except Exception as e:
         logger.error(f"保存账户配置失败: {e}")
         return ResponseModel.error(msg=f"保存账户配置失败: {str(e)}")
+
+
+@app.get(f"/{PREFIX}/basic_code/account/lock")
+def basic_code_account_lock(framework_id: str, account_name: str, is_lock: bool):
+    """
+    账户锁定/解锁接口
+    
+    控制指定账户的锁定状态，通过改变配置文件名前缀来实现账户的启用/禁用。
+    锁定的账户将不会被框架加载，从而实现账户的安全控制。
+    
+    :param framework_id: 框架ID，用于定位框架目录
+    :type framework_id: str
+    :param account_name: 账户名称，用于定位具体账户配置
+    :type account_name: str
+    :param is_lock: 锁定状态标志
+    :type is_lock: bool
+    :return: 操作结果响应
+    :rtype: ResponseModel
+    
+    Returns:
+        ResponseModel:
+            - 成功时返回空数据的成功响应
+            - 失败时返回包含错误信息的失败响应
+    
+    Process:
+        1. 验证框架下载状态和目录存在性
+        2. 更新账户JSON配置中的is_lock字段
+        3. 根据锁定状态重命名Python配置文件：
+           - is_lock=True: 将 account_name.py 重命名为 _account_name.py (锁定)
+           - is_lock=False: 将 _account_name.py 重命名为 account_name.py (解锁)
+        4. 返回操作结果
+    
+    File Naming Convention:
+        - 正常文件: account_name.py (框架可加载)
+        - 锁定文件: _account_name.py (框架忽略，以下划线开头)
+    """
+    logger.info(f"账户锁定状态操作: 框架={framework_id}, 账户={account_name}, 锁定={is_lock}")
+
+    try:
+        # 验证框架下载状态
+        framework_status = get_framework_status(framework_id)
+        if not framework_status:
+            logger.error(f"框架未下载完成: {framework_id}")
+            return ResponseModel.error(msg=f'框架未下载完成')
+
+        # 验证账户目录存在性
+        target_dir = Path(framework_status.path) / 'accounts'
+        if not target_dir.exists():
+            logger.warning(f"账户目录不存在: {target_dir}")
+            return ResponseModel.error(msg=f'{target_dir} 路径不存在')
+
+        # 验证账户配置文件存在性
+        account_json_path = target_dir / f'{account_name}.json'
+        if not account_json_path.exists():
+            logger.error(f"账户配置文件不存在: {account_json_path}")
+            return ResponseModel.error(msg=f"账户 {account_name} 配置文件不存在")
+
+        # 读取并更新账户配置
+        account_json = json.loads(account_json_path.read_text(encoding='utf-8'))
+        account_json['is_lock'] = is_lock
+        logger.info(f"更新账户配置中的锁定状态: is_lock={is_lock}")
+
+        # 根据 is_lock 状态确定文件路径
+        if is_lock:
+            # 锁定状态：将正常文件重命名为下划线开头文件
+            target_py_path = target_dir / f'_{account_name}.py'
+            old_py_path = target_dir / f'{account_name}.py'
+            operation = "锁定"
+        else:
+            # 解锁状态：将下划线开头文件重命名为正常文件
+            target_py_path = target_dir / f'{account_name}.py'
+            old_py_path = target_dir / f'_{account_name}.py'
+            operation = "解锁"
+
+        # 验证源文件存在性
+        if not old_py_path.exists():
+            logger.error(f"源Python配置文件不存在: {old_py_path}")
+            return ResponseModel.error(msg=f"Python配置文件不存在: {old_py_path.name}")
+
+        # 执行文件重命名操作
+        shutil.move(str(old_py_path), str(target_py_path))
+        logger.info(f"文件重命名成功: {old_py_path.name} -> {target_py_path.name}")
+
+        # 保存更新后的JSON配置
+        account_json_path.write_text(
+            json.dumps(account_json, ensure_ascii=False, indent=2),
+            encoding='utf-8'
+        )
+        logger.info(f"账户配置文件已更新: {account_json_path}")
+
+        logger.info(f"账户{operation}操作完成: {account_name}")
+        return ResponseModel.ok(data={
+            "account_name": account_name,
+            "is_lock": is_lock,
+            "operation": operation,
+            "python_file": target_py_path.name
+        })
+
+    except FileNotFoundError as e:
+        logger.error(f"文件操作失败，文件未找到: {e}")
+        return ResponseModel.error(msg=f"配置文件不存在: {str(e)}")
+    except PermissionError as e:
+        logger.error(f"文件操作失败，权限不足: {e}")
+        return ResponseModel.error(msg=f"文件权限不足: {str(e)}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON配置文件解析失败: {e}")
+        return ResponseModel.error(msg=f"配置文件格式错误: {str(e)}")
+    except Exception as e:
+        logger.error(f"账户锁定操作失败: {e}")
+        return ResponseModel.error(msg=f"锁定操作失败: {str(e)}")
 
 
 @app.get(f"/{PREFIX}/basic_code/account/list")
@@ -1108,12 +1224,45 @@ def basic_code_account_delete(framework_id: str, account_name: str):
             logger.warning(f"账户目录不存在: {target_dir}")
             return ResponseModel.error(msg=f'{target_dir} 路径不存在')
 
-        # 删除JSON和Python文件
+        # 先读取账户配置获取策略名称（在删除JSON文件之前）
         json_file = target_dir / f'{account_name}.json'
-        py_file = target_dir / f'{account_name}.py'
+        py_file = target_dir / f'{account_name}.py'  # 正常使用
+        _py_file = target_dir / f'_{account_name}.py'  # 锁定账户
 
+        # 删除JSON和Python文件
         json_file.unlink(missing_ok=True)
         py_file.unlink(missing_ok=True)
+        _py_file.unlink(missing_ok=True)
+        logger.info(f"已删除账户配置文件: {json_file.name}, {py_file.name}")
+
+        # 删除当前账户下的所有数据
+        account_folder = Path(framework_status.path) / 'data' / account_name
+        shutil.rmtree(account_folder, ignore_errors=True)
+        logger.info(f"已删除账户数据目录: {account_folder}")
+
+        # 删除当前账户下 snapshot 数据
+        snapshot_folder = Path(framework_status.path) / 'data' / 'snapshot'
+        if snapshot_folder.exists():
+            try:
+                # 删除以 account_name + '_' 开头的目录（不依赖策略名称）
+                snapshot_prefix = f"{account_name}_"
+                logger.info(f"查找并删除snapshot目录，前缀: {snapshot_prefix}")
+
+                deleted_count = 0
+                for item in snapshot_folder.iterdir():
+                    if item.is_dir() and item.name.startswith(snapshot_prefix):
+                        logger.info(f"删除snapshot目录: {item}")
+                        shutil.rmtree(item, ignore_errors=True)
+                        deleted_count += 1
+
+                if deleted_count > 0:
+                    logger.info(f"成功删除 {deleted_count} 个snapshot目录")
+                else:
+                    logger.info(f"未找到匹配的snapshot目录: {snapshot_prefix}*")
+            except Exception as e:
+                logger.warning(f"删除snapshot目录时出错: {e}")
+        else:
+            logger.info("snapshot目录不存在，跳过删除")
 
         logger.info(f"账户文件删除完成")
         return ResponseModel.ok()
@@ -1205,7 +1354,8 @@ def basic_code_account_apikey_secret(apikey_secret: ApiKeySecretModel):
         account_json_path = accounts_dir / f'{apikey_secret.account_name}.json'
         if not account_json_path.exists():
             logger.error(f"账户配置文件不存在: {account_json_path}")
-            return ResponseModel.error(msg=f"{apikey_secret.account_name} 账户没有创建，无法配置 {apikey_secret.keyword}")
+            return ResponseModel.error(
+                msg=f"{apikey_secret.account_name} 账户没有创建，无法配置 {apikey_secret.keyword}")
 
         # 创建临时缓存目录
         temp_dir = accounts_dir / '.temp'
@@ -1236,7 +1386,8 @@ def basic_code_account_apikey_secret(apikey_secret: ApiKeySecretModel):
                 existing_metadata = json.loads(metadata_file.read_text(encoding='utf-8'))
                 # 如果total不匹配，清理旧缓存重新开始
                 if existing_metadata.get("total") != apikey_secret.total:
-                    logger.warning(f"分段总数不匹配，清理旧缓存: 旧={existing_metadata.get('total')} vs 新={apikey_secret.total}")
+                    logger.warning(
+                        f"分段总数不匹配，清理旧缓存: 旧={existing_metadata.get('total')} vs 新={apikey_secret.total}")
                     # 清理除元数据外的所有分段文件
                     for file in segment_dir.glob("segment_*.txt"):
                         file.unlink()
@@ -1477,6 +1628,7 @@ def basic_code_account_binding_strategy(framework_id: str, account_name: str, fi
             accounts_dir
         )
         logger.info(f"账户Python文件已生成: {accounts_dir / account_name}.py")
+        account_path.write_text(json.dumps(account_json, ensure_ascii=False, indent=2))
 
         logger.info("账户策略绑定完成")
         return ResponseModel.ok()
@@ -1484,6 +1636,57 @@ def basic_code_account_binding_strategy(framework_id: str, account_name: str, fi
     except Exception as e:
         logger.error(f"账户绑定策略失败: {e}")
         return ResponseModel.error(msg=f"绑定策略失败: {str(e)}")
+
+
+@app.get(f"/{PREFIX}/basic_code/all_account/statistics")
+def basic_code_all_account_statistics():
+    """
+    获取所有框架下的账户统计信息
+    
+    遍历所有已完成下载的框架，提取每个框架下的账户统计信息，
+    包括资金曲线、子策略表现、持仓数据等详细信息。
+    
+    Returns:
+        ResponseModel: 包含所有账户统计信息的响应
+    """
+    logger.info("开始获取所有账户统计信息")
+    result = []
+
+    # 遍历所有已完成的框架
+    for framework_status in get_all_finished_framework_status():
+        try:
+            # 调用封装的函数处理单个框架的账户统计
+            framework_accounts = process_framework_account_statistics(framework_status)
+            result.extend(framework_accounts)
+        except Exception as e:
+            logger.error(f"处理框架 {framework_status.framework_id} 的账户统计失败: {e}")
+            continue
+
+    logger.info(f"账户统计信息获取完成，共处理 {len(result)} 个账户")
+    return ResponseModel.ok(data=result)
+
+
+@app.get(f"/{PREFIX}/basic_code/account/statistics")
+def basic_code_account_statistics(framework_id: str):
+    """
+    获取指定框架下的账户统计信息
+
+    指定已完成下载的框架，提取每个框架下的账户统计信息，
+    包括资金曲线、子策略表现、持仓数据等详细信息。
+
+    Returns:
+        ResponseModel: 包含所有账户统计信息的响应
+    """
+    logger.info("开始获取所有账户统计信息")
+
+    framework_status = get_framework_status(framework_id)
+    try:
+        # 调用封装的函数处理单个框架的账户统计
+        framework_accounts = process_framework_account_statistics(framework_status)
+        return ResponseModel.ok(data=framework_accounts)
+    except Exception as e:
+        logger.error(f"处理框架 {framework_status.framework_id} 的账户统计失败: {e}")
+        return ResponseModel.error(msg=f"处理框架 {framework_status.framework_id} 的账户统计失败")
 
 
 if __name__ == "__main__":

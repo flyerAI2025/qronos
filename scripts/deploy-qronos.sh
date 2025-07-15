@@ -34,8 +34,6 @@ VERSION=""
 CONTAINER_NAME=""
 DOCKER_MIRROR="china"  # 默认使用中国镜像源加速
 SKIP_DOCKER_INSTALL=false
-SKIP_SWAP_CHECK=false
-AUTO_SETUP_SWAP=false
 
 # 解析命令行参数
 parse_arguments() {
@@ -47,14 +45,6 @@ parse_arguments() {
                 ;;
             --skip-docker-install)
                 SKIP_DOCKER_INSTALL=true
-                shift
-                ;;
-            --skip-swap-check)
-                SKIP_SWAP_CHECK=true
-                shift
-                ;;
-            --auto-setup-swap)
-                AUTO_SETUP_SWAP=true
                 shift
                 ;;
             --help|-h)
@@ -96,10 +86,6 @@ parse_arguments() {
         CONTAINER_NAME="qronos-app"
     fi
     
-    # 布尔值默认设置
-    SKIP_SWAP_CHECK=${SKIP_SWAP_CHECK:-false}
-    AUTO_SETUP_SWAP=${AUTO_SETUP_SWAP:-false}
-    
     # 显示最终使用的参数
     log_info "使用配置："
     log_info "  镜像名称: $DOCKER_HUB_IMAGE"
@@ -122,8 +108,6 @@ show_help() {
     echo "选项:"
     echo "  --docker-mirror <源>    Docker镜像源 (official|china|tencent|aliyun|ustc) [默认: china]"
     echo "  --skip-docker-install   跳过Docker安装检查"
-    echo "  --skip-swap-check       跳过内存检查"
-    echo "  --auto-setup-swap       自动设置虚拟内存"
     echo "  --help, -h              显示此帮助信息"
     echo ""
     echo "Docker镜像源说明:"
@@ -132,6 +116,13 @@ show_help() {
     echo "  tencent         腾讯云镜像源"
     echo "  aliyun          阿里云镜像源"
     echo "  ustc            中科大镜像源"
+    echo ""
+    echo "镜像版本检查说明:"
+    echo "  脚本会自动检查远程和本地镜像版本是否一致："
+    echo "    - 如果版本一致：直接使用本地镜像启动容器"
+    echo "    - 如果版本不一致：删除本地镜像，重新拉取最新版本"
+    echo "    - 如果本地镜像不存在：直接拉取最新版本"
+    echo "    - 如果网络检查失败：提示用户选择强制更新或使用本地镜像"
     echo ""
     echo "内存配置说明:"
     echo "  该脚本会自动检测系统内存配置，并在需要时推荐配置虚拟内存"
@@ -144,11 +135,12 @@ show_help() {
     echo "  $0                                                   # 使用默认参数"
     echo "  $0 myuser/qronos v1.0.0 my-container                # 指定镜像和容器名"
     echo "  $0 --docker-mirror aliyun                           # 使用阿里云镜像源"
-    echo "  $0 --auto-setup-swap                                # 自动配置虚拟内存"
-    echo "  $0 --skip-swap-check                                # 跳过内存检查"
-    echo "  $0 myuser/qronos latest qronos --auto-setup-swap    # 完整参数示例"
+    echo "  $0 myuser/qronos latest qronos --docker-mirror official    # 完整参数示例"
     echo ""
     echo "注意事项:"
+    echo "  - 镜像版本检查需要网络连接到Docker Hub"
+    echo "  - 版本检查失败时会提示用户选择处理方式"
+    echo "  - 强制更新会删除本地镜像，需要重新下载完整镜像"
     echo "  - 内存检查和虚拟内存配置仅在Linux系统上执行"
     echo "  - 配置虚拟内存需要root权限"
     echo "  - 虚拟内存配置会占用磁盘空间，请确保有足够的存储空间"
@@ -426,10 +418,6 @@ install_docker() {
 
 # 检查系统内存配置
 check_memory_configuration() {
-    if [[ "$SKIP_SWAP_CHECK" == "true" ]]; then
-        log_info "跳过内存检查"
-        return 0
-    fi
     
     log_step "检查系统内存配置..."
     
@@ -477,25 +465,20 @@ check_memory_configuration() {
         echo "   - 建议Swap大小: ${RECOMMENDED_SWAP_GB}GB"
         echo "   - 配置后总虚拟内存: $((TOTAL_MEM_GB + RECOMMENDED_SWAP_GB))GB"
         
-        if [[ "$AUTO_SETUP_SWAP" == "true" ]]; then
-            log_info "自动配置模式：开始设置虚拟内存..."
-            setup_swap_automatically
+        echo ""
+        read -p "是否现在配置虚拟内存？(y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            setup_swap_interactively
         else
+            log_warning "跳过虚拟内存配置，请注意监控内存使用情况"
             echo ""
-            read -p "是否现在配置虚拟内存？(y/N): " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                setup_swap_interactively
-            else
-                log_warning "跳过虚拟内存配置，请注意监控内存使用情况"
-                echo ""
-                echo "📋 手动配置虚拟内存的命令:"
-                echo "   sudo fallocate -l ${RECOMMENDED_SWAP_GB}G /swapfile"
-                echo "   sudo chmod 600 /swapfile"
-                echo "   sudo mkswap /swapfile"
-                echo "   sudo swapon /swapfile"
-                echo "   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab"
-            fi
+            echo "📋 手动配置虚拟内存的命令:"
+            echo "   sudo fallocate -l ${RECOMMENDED_SWAP_GB}G /swapfile"
+            echo "   sudo chmod 600 /swapfile"
+            echo "   sudo mkswap /swapfile"
+            echo "   sudo swapon /swapfile"
+            echo "   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab"
         fi
     else
         log_success "当前内存配置良好，无需额外配置虚拟内存"
@@ -699,7 +682,7 @@ get_public_ip() {
         for service in "${services[@]}"; do
             if [[ "$service" == "httpbin.org/ip" ]]; then
                 # httpbin返回JSON格式，需要解析
-                ip=$(curl -s --connect-timeout 5 --max-time 10 "https://$service" 2>/dev/null | grep -o '"origin":"[^"]*"' | cut -d'"' -f4 | cut -d',' -f1)
+                ip=$(curl -s --connect-timeout 5 --max-time 10 "https://$service" 2>/dev/null | grep -o '"origin":[[:space:]]*"[^"]*"' | sed 's/.*"origin":[[:space:]]*"\([^"]*\)".*/\1/' | cut -d',' -f1)
             else
                 ip=$(curl -s --connect-timeout 5 --max-time 10 "https://$service" 2>/dev/null | tr -d '\n\r' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
             fi
@@ -796,9 +779,391 @@ setup_data_directories() {
     fi
 }
 
-# 拉取镜像
-pull_docker_image() {
-    log_step "拉取Docker镜像..."
+# 检查本地镜像是否存在
+check_local_image_exists() {
+    local image_name="$1"
+    docker image inspect "${image_name}" >/dev/null 2>&1
+}
+
+# 获取远程镜像ID
+get_remote_image_id() {
+    local image_name="$1"
+    log_info "获取远程镜像信息: ${image_name}" >&2
+    
+    # 首先尝试使用docker pull --dry-run（如果支持）来获取最新的digest
+    # 这是最可靠的方法，因为它会返回实际会被拉取的镜像digest
+    local remote_digest=""
+    
+    # 检查是否支持 --dry-run（较新版本的Docker支持）
+    if docker pull --help 2>&1 | grep -q -- --dry-run; then
+        log_info "使用 docker pull --dry-run 检查远程镜像..." >&2
+        local pull_output=$(docker pull --dry-run "${image_name}" 2>&1)
+        if [[ $? -eq 0 ]]; then
+            # 从输出中提取digest
+            remote_digest=$(echo "$pull_output" | grep -o 'Digest: sha256:[^[:space:]]*' | sed 's/Digest: //' | head -1)
+        fi
+    fi
+    
+    # 如果上述方法失败，尝试使用manifest inspect
+    if [[ -z "$remote_digest" ]]; then
+        log_info "使用docker manifest方式获取远程镜像信息..." >&2
+        local manifest_output=$(docker manifest inspect "${image_name}" 2>/dev/null)
+        
+        if [[ -n "$manifest_output" ]]; then
+            # 检查是否是多架构镜像（manifest list）
+            if echo "$manifest_output" | grep -q '"mediaType".*manifest.list\|image.index'; then
+                # 多架构镜像，需要获取当前架构的digest
+                local current_arch=$(uname -m)
+                local docker_arch="amd64"  # 默认
+                
+                if [[ "$current_arch" == "x86_64" ]]; then
+                    docker_arch="amd64"
+                elif [[ "$current_arch" == "aarch64" ]] || [[ "$current_arch" == "arm64" ]]; then
+                    docker_arch="arm64"
+                fi
+                
+                log_info "检测到多架构镜像，获取 $docker_arch 架构的digest..." >&2
+                
+                # 获取特定架构的镜像digest
+                # 注意：我们需要的是镜像层的digest，而不是manifest的digest
+                # 但是为了比较，我们使用manifest digest
+                remote_digest=$(echo "$manifest_output" | grep -A 5 "\"architecture\":[[:space:]]*\"$docker_arch\"" | grep '"digest"' | grep -o '"sha256:[^"]*"' | tr -d '"' | head -1)
+            else
+                # 单架构镜像，直接获取digest
+                remote_digest=$(echo "$manifest_output" | grep -o '"digest":[[:space:]]*"sha256:[^"]*"' | sed 's/.*"sha256:\([^"]*\)".*/sha256:\1/' | head -1)
+            fi
+        fi
+    fi
+    
+    # 如果还是失败，尝试使用Docker Hub API
+    if [[ -z "$remote_digest" ]] && command -v curl >/dev/null 2>&1; then
+        log_info "使用Docker Hub API获取远程镜像信息..." >&2
+        local repo_name="${image_name}"
+        if [[ "$repo_name" != *"/"* ]]; then
+            repo_name="library/${repo_name}"
+        fi
+        
+        # 提取用户名和仓库名
+        local user_repo="${repo_name%:*}"
+        local tag="${image_name##*:}"
+        if [[ "$tag" == "$image_name" ]]; then
+            tag="latest"
+        fi
+        
+        # 获取认证token
+        local token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${user_repo}:pull" 2>/dev/null | grep -o '"token":[[:space:]]*"[^"]*"' | sed 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/')
+        
+        if [[ -n "$token" ]]; then
+            # 获取manifest
+            remote_digest=$(curl -s -H "Authorization: Bearer $token" \
+                -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                "https://registry-1.docker.io/v2/${user_repo}/manifests/${tag}" 2>/dev/null | \
+                grep -o '"digest":[[:space:]]*"sha256:[^"]*"' | sed 's/.*"sha256:\([^"]*\)".*/sha256:\1/' | head -1)
+        fi
+    fi
+    
+    echo "$remote_digest"
+}
+
+# 获取本地镜像ID
+get_local_image_id() {
+    local image_name="$1"
+    docker image inspect "${image_name}" --format '{{.Id}}' 2>/dev/null | cut -d':' -f2 | head -c12
+}
+
+# 获取本地镜像RepoDigests
+get_local_image_digest() {
+    local image_name="$1"
+    # 获取RepoDigests中的digest部分（不包含仓库名）
+    docker image inspect "${image_name}" --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' 2>/dev/null | grep -o '@sha256:[^[:space:]]*' | sed 's/@//' | head -1
+}
+
+# 清理无标签镜像
+cleanup_dangling_images() {
+    log_info "清理无标签镜像（dangling images）..."
+    
+    # 获取所有无标签镜像
+    local dangling_images=$(docker images -f "dangling=true" -q 2>/dev/null)
+    
+    if [[ -z "$dangling_images" ]]; then
+        log_info "没有发现无标签镜像，无需清理"
+        return 0
+    fi
+    
+    # 统计数量
+    local count=$(echo "$dangling_images" | wc -l)
+    log_info "发现 $count 个无标签镜像，开始清理..."
+    
+    # 显示要删除的镜像信息
+    echo ""
+    echo "🗑️  准备删除的无标签镜像:"
+    docker images -f "dangling=true" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}" 2>/dev/null || {
+        docker images -f "dangling=true" 2>/dev/null
+    }
+    echo ""
+    
+    # 停止所有使用无标签镜像的容器
+    log_info "检查并停止使用无标签镜像的容器..."
+    
+    # 使用数组避免子shell问题
+    local dangling_array=()
+    while IFS= read -r image_id; do
+        [[ -n "$image_id" ]] && dangling_array+=("$image_id")
+    done <<< "$dangling_images"
+    
+    # 停止使用无标签镜像的容器
+    for image_id in "${dangling_array[@]}"; do
+        local containers=$(docker ps -a --filter "ancestor=${image_id}" --format "{{.Names}}" 2>/dev/null)
+        if [[ -n "$containers" ]]; then
+            while IFS= read -r container_name; do
+                if [[ -n "$container_name" ]]; then
+                    log_info "停止容器: $container_name (使用镜像: $image_id)"
+                    docker stop "$container_name" 2>/dev/null || true
+                    docker rm "$container_name" 2>/dev/null || true
+                fi
+            done <<< "$containers"
+        fi
+    done
+    
+    # 删除无标签镜像（改进版本）
+    local deleted_count=0
+    local failed_count=0
+    
+    # 使用for循环避免子shell问题
+    for image_id in "${dangling_array[@]}"; do
+        # 首先尝试普通删除
+        if docker rmi "$image_id" >/dev/null 2>&1; then
+            log_info "✅ 删除成功: $image_id"
+            deleted_count=$((deleted_count + 1))
+        else
+            # 普通删除失败，尝试强制删除
+            log_info "尝试强制删除: $image_id"
+            if docker rmi -f "$image_id" >/dev/null 2>&1; then
+                log_info "✅ 强制删除成功: $image_id"
+                deleted_count=$((deleted_count + 1))
+            else
+                # 获取详细的错误信息
+                local error_msg=$(docker rmi "$image_id" 2>&1 || true)
+                log_warning "❌ 删除失败: $image_id"
+                log_info "错误详情: $error_msg"
+                failed_count=$((failed_count + 1))
+                
+                # 显示哪些容器或镜像可能在使用这个镜像
+                local dependent_containers=$(docker ps -a --filter "ancestor=${image_id}" --format "{{.Names}}" 2>/dev/null)
+                if [[ -n "$dependent_containers" ]]; then
+                    log_info "使用此镜像的容器: $dependent_containers"
+                fi
+                
+                # 检查镜像依赖关系  
+                local dependent_images=$(docker images --filter "reference=*:*" --format "{{.Repository}}:{{.Tag}}" | xargs -I {} docker image inspect {} --format "{{.Id}} {{.RepoTags}}" 2>/dev/null | grep "$image_id" | head -3 || true)
+                if [[ -n "$dependent_images" ]]; then
+                    log_info "可能的依赖镜像: $dependent_images"
+                fi
+            fi
+        fi
+    done
+    
+    # 显示清理进度
+    log_info "第一轮清理完成：成功删除 $deleted_count 个，失败 $failed_count 个"
+    
+    # 使用 docker image prune 作为补充清理
+    log_info "执行系统级镜像清理..."
+    local prune_result=""
+    
+    # 先尝试清理悬空镜像
+    prune_result=$(docker image prune -f 2>/dev/null || echo "No images to remove")
+    if echo "$prune_result" | grep -q "deleted\|reclaimed"; then
+        local reclaimed_space=$(echo "$prune_result" | grep "reclaimed" | sed 's/.*reclaimed //' || echo "未知大小")
+        log_success "系统清理完成，回收空间: $reclaimed_space"
+    else
+        log_info "系统清理完成，没有额外空间回收"
+    fi
+    
+    # 再次尝试清理残留的无标签镜像
+    local remaining_dangling=$(docker images -f "dangling=true" -q 2>/dev/null || true)
+    if [[ -n "$remaining_dangling" ]]; then
+        log_info "发现残留无标签镜像，尝试批量清理..."
+        
+        # 将结果转换为数组进行批量清理
+        local remaining_array=()
+        while IFS= read -r image_id; do
+            [[ -n "$image_id" ]] && remaining_array+=("$image_id")
+        done <<< "$remaining_dangling"
+        
+        # 批量强制删除（如果仍有残留）
+        for image_id in "${remaining_array[@]}"; do
+            log_info "尝试批量删除: $image_id"
+            if docker rmi -f "$image_id" >/dev/null 2>&1; then
+                log_info "✅ 批量删除成功: $image_id"
+            else
+                log_info "⚠️  批量删除失败: $image_id (将尝试系统清理)"
+            fi
+        done
+    fi
+    
+    # 显示最终清理结果
+    local final_dangling_count=$(docker images -f "dangling=true" -q 2>/dev/null | wc -l || echo "0")
+    final_dangling_count=${final_dangling_count:-0}
+    
+    if [[ "$final_dangling_count" -eq 0 ]]; then
+        log_success "✅ 无标签镜像清理完成，系统中无残留镜像"
+    else
+        log_warning "⚠️  仍有 $final_dangling_count 个无标签镜像未能删除"
+        echo ""
+        echo "📋 残留镜像信息："
+        docker images -f "dangling=true" --format "   {{.ID}} ({{.CreatedSince}}, {{.Size}})" 2>/dev/null || {
+            docker images -f "dangling=true" 2>/dev/null || echo "   无法获取镜像详情"
+        }
+        echo ""
+        echo "💡 这些镜像可能："
+        echo "   - 被其他正在运行的容器使用"
+        echo "   - 与正在运行的镜像共享文件系统层"
+        echo "   - 被Docker内部进程锁定"
+        echo ""
+        echo "🛠️  手动清理命令："
+        echo "   docker images -f dangling=true  # 查看无标签镜像"
+        echo "   docker system prune -a -f       # 强制清理所有未使用资源"
+        echo "   docker container prune -f       # 清理停止的容器"
+        echo ""
+        log_info "残留的无标签镜像不会影响系统正常运行"
+    fi
+    
+    log_info "无标签镜像清理流程已完成，继续后续部署步骤..."
+}
+
+# 比较镜像版本
+compare_image_versions() {
+    local image_name="$1"
+    
+    log_step "检查镜像版本更新..."
+    
+    # 检查本地镜像是否存在
+    if ! check_local_image_exists "${image_name}"; then
+        log_info "本地镜像不存在，需要拉取: ${image_name}"
+        return 2  # 需要拉取
+    fi
+    
+    log_info "本地镜像已存在，检查版本差异..."
+    
+    # 获取本地镜像信息
+    local local_image_id=$(get_local_image_id "${image_name}")
+    local local_digest=$(get_local_image_digest "${image_name}")
+    
+    log_info "本地镜像ID: ${local_image_id:-未知}"
+    log_info "本地镜像Digest: ${local_digest:-未知}"
+    
+    # 获取远程镜像信息
+    local remote_digest=$(get_remote_image_id "${image_name}")
+    
+    if [[ -z "$remote_digest" ]]; then
+        log_warning "无法获取远程镜像信息，跳过版本检查"
+        log_info "可能的原因："
+        echo "   - 网络连接问题"
+        echo "   - Docker Hub API限制"
+        echo "   - 镜像名称不正确"
+        echo "   - 镜像仓库访问限制"
+        return 3  # 网络检查失败，需要用户选择
+    fi
+    
+    log_info "远程镜像Digest: ${remote_digest}"
+    
+    # 比较digest
+    if [[ -n "$local_digest" ]] && [[ -n "$remote_digest" ]]; then
+        if [[ "$local_digest" == "$remote_digest" ]]; then
+            log_success "本地镜像版本是最新的，无需更新"
+            return 0  # 版本一致
+        else
+            # 对于多架构镜像，digest可能不匹配是正常的
+            # 我们可以尝试通过 docker pull 来让Docker自己判断
+            log_info "检测到digest不一致，尝试让Docker判断是否需要更新..."
+            
+            # 使用docker pull检查（不实际拉取）
+            local pull_check=$(docker pull "${image_name}" 2>&1)
+            if echo "$pull_check" | grep -q "Status: Image is up to date\|already exists"; then
+                log_success "Docker确认本地镜像已是最新版本"
+                return 0  # 版本一致
+            else
+                log_warning "检测到镜像版本不一致，需要更新"
+                echo ""
+                echo "📊 版本对比:"
+                echo "   本地版本: ${local_digest:-未知}"
+                echo "   远程版本: ${remote_digest:-未知}"
+                echo "   本地镜像ID: ${local_image_id:-未知}"
+                return 1  # 版本不一致，需要更新
+            fi
+        fi
+    elif [[ -z "$remote_digest" ]]; then
+        # 无法获取远程digest，但这对于多架构镜像是常见的
+        log_info "无法精确比较版本（多架构镜像），将使用Docker的判断"
+        return 3  # 需要用户选择
+    else
+        log_warning "检测到镜像版本信息不完整"
+        echo ""
+        echo "📊 版本信息:"
+        echo "   本地版本: ${local_digest:-未知}"
+        echo "   远程版本: ${remote_digest:-未知}"
+        echo "   本地镜像ID: ${local_image_id:-未知}"
+        return 1  # 假设需要更新
+    fi
+}
+
+# 删除本地镜像
+remove_local_image() {
+    local image_name="$1"
+    
+    log_info "删除本地镜像: ${image_name}"
+    
+    # 获取镜像ID，用于后续验证
+    local image_id=$(get_local_image_id "${image_name}")
+    log_info "目标删除镜像ID: ${image_id}"
+    
+    # 检查是否有容器使用该镜像
+    local containers_using_image=$(docker ps -a --filter "ancestor=${image_name}" --format "{{.Names}}" 2>/dev/null)
+    
+    if [[ -n "$containers_using_image" ]]; then
+        log_info "发现使用该镜像的容器，先停止并删除..."
+        echo "$containers_using_image" | while read -r container_name; do
+            if [[ -n "$container_name" ]]; then
+                log_info "停止容器: $container_name"
+                docker stop "$container_name" 2>/dev/null || true
+                log_info "删除容器: $container_name"
+                docker rm "$container_name" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # 删除镜像标签
+    if docker rmi "${image_name}" 2>/dev/null; then
+        log_success "镜像标签删除成功: ${image_name}"
+    else
+        log_warning "删除镜像标签失败，尝试强制删除..."
+        # 尝试强制删除
+        if docker rmi -f "${image_name}" 2>/dev/null; then
+            log_success "强制删除镜像标签成功: ${image_name}"
+        else
+            log_error "无法删除镜像标签，请手动处理"
+            return 1
+        fi
+    fi
+    
+    # 验证镜像是否还存在（可能变成无标签镜像）
+    if [[ -n "$image_id" ]]; then
+        if docker image inspect "$image_id" >/dev/null 2>&1; then
+            log_info "检测到镜像 $image_id 仍然存在（可能为无标签镜像），尝试删除..."
+            if docker rmi "$image_id" 2>/dev/null; then
+                log_success "成功删除镜像: $image_id"
+            else
+                log_warning "无法删除镜像 $image_id，可能被其他镜像层共享"
+            fi
+        else
+            log_success "镜像已完全删除: $image_id"
+        fi
+    fi
+}
+
+# 拉取或更新镜像
+pull_or_update_docker_image() {
+    log_step "检查和更新Docker镜像..."
     
     # 确保变量已正确初始化
     if [[ -z "$DOCKER_HUB_IMAGE" ]]; then
@@ -811,26 +1176,170 @@ pull_docker_image() {
         log_info "使用默认版本: $VERSION"
     fi
     
-    # 显示即将拉取的镜像信息
-    log_info "准备拉取镜像: ${DOCKER_HUB_IMAGE}:${VERSION}"
+    local full_image_name="${DOCKER_HUB_IMAGE}:${VERSION}"
+    log_info "目标镜像: ${full_image_name}"
     
-    # 拉取最新镜像
-    log_info "从Docker Hub拉取镜像..."
-    if ! docker pull "${DOCKER_HUB_IMAGE}:${VERSION}"; then
-        log_error "镜像拉取失败，请检查："
-        echo "   1. 镜像名称是否正确: ${DOCKER_HUB_IMAGE}"
-        echo "   2. 版本标签是否存在: ${VERSION}"
-        echo "   3. 网络连接是否正常"
-        echo "   4. Docker Hub是否可访问"
-        echo ""
-        echo "   可以尝试："
-        echo "   - 使用官方镜像源：$0 --docker-mirror official"
-        echo "   - 检查网络连接：ping docker.io"
-        echo "   - 手动拉取测试：docker pull hello-world"
-        exit 1
+    # 检查镜像版本
+    # 比较镜像版本
+    # 暂时关闭 set -e 以处理返回值
+    set +e
+    compare_image_versions "${full_image_name}"
+    local version_check_result=$?
+    set -e
+    
+    case $version_check_result in
+        0)
+            # 版本一致，无需更新
+            log_success "使用现有本地镜像: ${full_image_name}"
+            return 0
+            ;;
+        1)
+            # 版本不一致，需要更新
+            log_step "更新镜像到最新版本..."
+            
+            # 删除本地镜像
+            if ! remove_local_image "${full_image_name}"; then
+                log_error "删除本地镜像失败"
+                return 1
+            fi
+            
+            # 拉取新镜像
+            log_info "拉取最新镜像: ${full_image_name}"
+            ;;
+        2)
+            # 本地镜像不存在，需要拉取
+            log_info "拉取镜像: ${full_image_name}"
+            ;;
+        3)
+            # 网络检查失败，需要用户选择
+            log_step "网络检查失败，无法验证镜像版本..."
+            echo ""
+            echo "🤔 镜像版本检查失败，您希望如何处理？"
+            echo ""
+            echo "📋 可选操作："
+            echo "   1. 强制更新镜像 - 删除本地镜像并重新拉取最新版本"
+            echo "   2. 使用本地镜像 - 直接使用现有本地镜像启动容器"
+            echo ""
+            log_warning "注意：强制更新会删除本地镜像，重新下载可能需要几分钟"
+            echo ""
+            
+            # 检查是否在自动化模式下
+            if [[ -n "${CI:-}" ]] || [[ -n "${AUTOMATED:-}" ]]; then
+                log_info "检测到自动化模式，默认使用本地镜像..."
+                log_success "使用现有本地镜像: ${full_image_name}"
+                return 0
+            fi
+            
+            # 交互式选择
+            while true; do
+                read -p "请选择操作 [1-强制更新/2-使用本地]: " -r choice
+                case $choice in
+                    1|y|Y|yes|YES)
+                        log_step "用户选择：强制更新镜像"
+                        log_info "开始删除本地镜像并重新拉取..."
+                        
+                        # 删除本地镜像
+                        if ! remove_local_image "${full_image_name}"; then
+                            log_error "删除本地镜像失败"
+                            return 1
+                        fi
+                        
+                        log_info "强制拉取最新镜像: ${full_image_name}"
+                        break
+                        ;;
+                    2|n|N|no|NO|"")
+                        log_step "用户选择：使用本地镜像"
+                        log_success "使用现有本地镜像: ${full_image_name}"
+                        return 0
+                        ;;
+                    *)
+                        echo "无效选择，请输入 1（强制更新）或 2（使用本地）"
+                        ;;
+                esac
+            done
+            ;;
+        *)
+            log_error "镜像版本检查异常"
+            return 1
+            ;;
+    esac
+    
+    # 执行镜像拉取
+    log_info "从Docker Hub拉取镜像: ${full_image_name}"
+    log_info "注意：镜像拉取可能需要几分钟时间，请耐心等待..."
+    
+    # 添加超时和详细错误处理
+    if command -v timeout >/dev/null 2>&1; then
+        # 使用30分钟超时
+        log_info "设置30分钟拉取超时..."
+        if timeout 1800 docker pull "${full_image_name}"; then
+            log_success "镜像拉取成功"
+        else
+            local exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                log_error "镜像拉取超时（30分钟），可能网络连接较慢"
+            else
+                log_error "镜像拉取失败，退出码: $exit_code"
+            fi
+            
+            log_error "镜像拉取失败，请检查："
+            echo "   1. 镜像名称是否正确: ${DOCKER_HUB_IMAGE}"
+            echo "   2. 版本标签是否存在: ${VERSION}"
+            echo "   3. 网络连接是否正常"
+            echo "   4. Docker Hub是否可访问"
+            echo ""
+            echo "   可以尝试："
+            echo "   - 使用官方镜像源：$0 --docker-mirror official"
+            echo "   - 检查网络连接：ping docker.io"
+            echo "   - 手动拉取测试：docker pull hello-world"
+            return 1
+        fi
+    else
+        # 没有timeout命令，直接拉取
+        log_warning "系统没有timeout命令，无法设置拉取超时"
+        if ! docker pull "${full_image_name}"; then
+            log_error "镜像拉取失败，请检查："
+            echo "   1. 镜像名称是否正确: ${DOCKER_HUB_IMAGE}"
+            echo "   2. 版本标签是否存在: ${VERSION}"
+            echo "   3. 网络连接是否正常"
+            echo "   4. Docker Hub是否可访问"
+            echo ""
+            echo "   可以尝试："
+            echo "   - 使用官方镜像源：$0 --docker-mirror official"
+            echo "   - 检查网络连接：ping docker.io"
+            echo "   - 手动拉取测试：docker pull hello-world"
+            return 1
+        fi
     fi
     
-    log_success "镜像拉取成功: ${DOCKER_HUB_IMAGE}:${VERSION}"
+    # 验证拉取结果
+    if check_local_image_exists "${full_image_name}"; then
+        local new_image_id=$(get_local_image_id "${full_image_name}")
+        local new_digest=$(get_local_image_digest "${full_image_name}")
+        
+        log_success "镜像拉取成功: ${full_image_name}"
+        echo "📊 新镜像信息:"
+        echo "   镜像ID: ${new_image_id:-未知}"
+        echo "   Digest: ${new_digest:-未知}"
+        
+        # 显示镜像大小信息
+        local image_size=$(docker image inspect "${full_image_name}" --format '{{.Size}}' 2>/dev/null)
+        if [[ -n "$image_size" ]]; then
+            local size_mb=$((image_size / 1024 / 1024))
+            echo "   大小: ${size_mb}MB"
+        fi
+        
+        # 清理无标签的镜像（防止镜像积累）
+        cleanup_dangling_images
+    else
+        log_error "镜像拉取验证失败"
+        return 1
+    fi
+}
+
+# 保持向后兼容的拉取镜像函数
+pull_docker_image() {
+    pull_or_update_docker_image
 }
 
 # 生成配置文件
@@ -1065,6 +1574,12 @@ show_deployment_result() {
     echo "停止容器: docker stop ${CONTAINER_NAME}"
     echo "删除容器: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"
     echo ""
+    echo "🧹 系统清理命令:"
+    echo "查看所有镜像: docker images"
+    echo "清理无标签镜像: docker image prune -f"
+    echo "清理所有未使用镜像: docker image prune -a -f"
+    echo "清理所有未使用资源: docker system prune -f"
+    echo ""
     
     # 显示数据目录信息
     echo "📁 数据目录说明:"
@@ -1191,13 +1706,43 @@ show_memory_status() {
 # ============================================================================
 
 main() {
+    # 错误处理函数
+    handle_deployment_error() {
+        local exit_code=$?
+        local line_number=$1
+        log_error "部署过程在第 $line_number 行出现错误，退出码: $exit_code"
+        log_error "最后执行的命令: $BASH_COMMAND"
+        echo ""
+        echo "🔍 调试信息："
+        echo "   - 当前目录: $(pwd)"
+        echo "   - 用户: $(whoami)"
+        echo "   - Docker状态: $(docker info > /dev/null 2>&1 && echo "正常" || echo "异常")"
+        echo "   - 网络连接: $(ping -c 1 8.8.8.8 > /dev/null 2>&1 && echo "正常" || echo "异常")"
+        echo ""
+        echo "💡 快速解决方案："
+        echo "   1. 重新运行: sudo $0 $@"
+        echo "   2. 检查Docker状态: docker info"
+        echo "   3. 检查网络连接: ping docker.io"
+        exit $exit_code
+    }
+    
+    # 设置错误处理（仅在不是已有trap的情况下）
+    if ! trap -p ERR | grep -q handle_deployment_error; then
+        trap 'handle_deployment_error $LINENO' ERR
+    fi
+    
+    log_step "开始部署流程..."
+    
     # 解析命令行参数
+    log_info "解析命令行参数..."
     parse_arguments "$@"
     
     # 最终验证关键变量
+    log_info "验证配置参数..."
     validate_required_variables
     
     # 检查Docker是否已安装
+    log_info "检查Docker安装状态..."
     if ! check_docker_installation; then
         log_warning "Docker未安装或未运行，开始安装..."
         install_docker
@@ -1209,6 +1754,7 @@ main() {
     fi
     
     # 检查Docker是否可用
+    log_info "验证Docker服务状态..."
     if ! docker info > /dev/null 2>&1; then
         log_error "Docker 未运行或无法访问"
         log_info "请检查Docker服务状态："
@@ -1230,8 +1776,9 @@ main() {
     # 设置数据目录
     setup_data_directories
     
-    # 拉取镜像
-    pull_docker_image
+    # 拉取或更新镜像
+    log_info "准备拉取/更新Docker镜像..."
+    pull_or_update_docker_image
     
     # 生成配置
     generate_configurations
@@ -1251,3 +1798,4 @@ main() {
 
 # 执行主函数
 main "$@"
+ 

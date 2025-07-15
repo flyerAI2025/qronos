@@ -7,3 +7,6 @@ pyotp==2.9.0
 colorama==0.4.6
 sqlalchemy==2.0.41
 aiosqlite==0.21.0
+pandas==2.2.2
+numpy==2.0.2
+pycryptodome==3.23.0

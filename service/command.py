@@ -87,6 +87,10 @@ def get_pm2_list() -> List[Dict[str, Any]]:
                 'name': item.get('name'),
                 'framework_id': item.get('pm2_env', {}).get('namespace'),
                 'status': item.get('pm2_env', {}).get('status'),
+                'restart_time': item.get('pm2_env', {}).get('restart_time'),  # 重启次数
+                'mem_usage': f'{round(item["monit"]["memory"] / (1024 ** 2), 2)}MB',  # 内存使用
+                'cpu_usage': f'{item["monit"]["cpu"]}%',  # cpu使用
+                'pm_uptime': item["pm2_env"]["pm_uptime"],  # 启动时间
             }
             data.append(formatted_item)
 
