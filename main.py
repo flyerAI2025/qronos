@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 from fastapi import (
     FastAPI, HTTPException, Request, Response, BackgroundTasks, UploadFile, File
@@ -62,7 +63,8 @@ from model.model import (
 )
 from service.basic_code import (
     generate_account_py_file_from_config, extract_variables_from_py,
-    generate_account_py_file_from_json, process_framework_account_statistics
+    generate_account_py_file_from_json, process_framework_account_statistics,
+    migrate_framework_data
 )
 from service.command import (
     get_pm2_list, del_pm2, get_pm2_env
@@ -71,6 +73,7 @@ from service.xbx_api import XbxAPI, TokenExpiredException
 from utils.auth import google_login, AuthMiddleware
 from utils.constant import DATA_CENTER_ID, PREFIX, CACHE_CODE_FILE, LOCAL_CODE_FILE, SELECT_COIN_ID
 from utils.log_kit import get_logger
+from service.log_parser import parse_data_center_logs
 
 # 初始化日志记录器
 logger = get_logger()
@@ -646,10 +649,11 @@ def basic_code_delete(framework_id: str):
         delete_framework_status(framework_id)
         logger.info(f"数据库记录已删除: {framework_id}")
 
+        # 只删数据库，不删磁盘文件
         # 删除本地文件
-        if framework_status.path:
-            shutil.rmtree(framework_status.path, ignore_errors=True)
-            logger.info(f"本地文件已删除: {framework_status.path}")
+        # if framework_status.path:
+        #     shutil.rmtree(framework_status.path, ignore_errors=True)
+        #     logger.info(f"本地文件已删除: {framework_status.path}")
 
         logger.info(f"框架删除完成: {framework_id}")
         return ResponseModel.ok()
@@ -1687,6 +1691,105 @@ def basic_code_account_statistics(framework_id: str):
     except Exception as e:
         logger.error(f"处理框架 {framework_status.framework_id} 的账户统计失败: {e}")
         return ResponseModel.error(msg=f"处理框架 {framework_status.framework_id} 的账户统计失败")
+
+
+@app.get(f"/{PREFIX}/basic_code/data/migration")
+def basic_code_data_migration(raw_framework_id: str, target_framework_id: str):
+    """
+    数据迁移接口
+    
+    将源框架的账户配置和数据迁移到目标框架。
+    包括账户配置文件（.json 和 .py）以及对应的用户数据目录。
+    
+    :param raw_framework_id: 源框架ID
+    :type raw_framework_id: str
+    :param target_framework_id: 目标框架ID
+    :type target_framework_id: str
+    :return: 迁移结果
+    :rtype: ResponseModel
+    
+    Process:
+        1. 验证两个框架是否下载完成
+        2. 迁移accounts目录下的用户配置文件（.json和.py）
+        3. 迁移data目录下的用户数据目录
+        4. 记录迁移过程和结果
+    """
+    logger.info(f"开始数据迁移: 源框架={raw_framework_id} -> 目标框架={target_framework_id}")
+    
+    try:
+        # 验证两个框架是否下载完成
+        raw_framework_status = get_framework_status(raw_framework_id)
+        if not raw_framework_status or not raw_framework_status.path:
+            logger.error(f"源框架未下载完成或路径为空: {raw_framework_id}")
+            return ResponseModel.error(msg=f'源框架 {raw_framework_id} 未下载完成')
+        
+        target_framework_status = get_framework_status(target_framework_id)
+        if not target_framework_status or not target_framework_status.path:
+            logger.error(f"目标框架未下载完成或路径为空: {target_framework_id}")
+            return ResponseModel.error(msg=f'目标框架 {target_framework_id} 未下载完成')
+        
+        # 调用service层的迁移逻辑
+        success, result, error_msg = migrate_framework_data(raw_framework_status, target_framework_status)
+        
+        if success:
+            return ResponseModel.ok(data=result, msg="所有账户迁移成功")
+        elif result:
+            # 部分成功的情况
+            return ResponseModel.ok(data=result, msg=f"迁移完成，但{error_msg}")
+        else:
+            # 完全失败的情况
+            return ResponseModel.error(msg=error_msg)
+    
+    except Exception as e:
+        logger.error(f"数据迁移接口调用异常: {e}")
+        return ResponseModel.error(msg=f"数据迁移失败: {str(e)}")
+
+
+@app.get(f"/{PREFIX}/data_center/operations")
+def get_data_center_operations(framework_id: str, hours: Optional[int] = 24):
+    """
+    获取数据中心操作日志
+    
+    解析指定数据中心框架的运行日志，提取时间点和操作信息。
+    支持获取完整操作历史、最近操作、按周期分组等多种视图。
+    
+    :param framework_id: 数据中心框架ID
+    :type framework_id: str
+    :param hours: 获取最近多少小时的日志，默认24小时，None表示获取全部日志
+    :type hours: Optional[int]
+    :return: 数据中心操作信息
+    :rtype: ResponseModel
+    
+    Returns:
+        ResponseModel:
+            - framework_info: 框架基础信息
+                - framework_id: 框架ID
+                - framework_name: 框架名称  
+                - log_file: 日志文件路径
+                - framework_path: 框架目录路径
+            - task_blocks: 任务块列表
+                - 每个任务块包含：id、start_time、end_time、runtime、operations、operation_count、block_duration
+            - task_blocks_count: 任务块总数
+    """
+    logger.info(f"获取数据中心操作日志: framework_id={framework_id}, hours={hours}")
+    
+    try:
+        # 解析数据中心日志
+        result = parse_data_center_logs(framework_id, hours)
+        
+        # 检查是否有错误
+        if "error" in result:
+            logger.error(f"数据中心日志解析失败: {result['error']}")
+            return ResponseModel.ok(msg=result["error"])
+        
+        logger.info(f"数据中心日志解析成功: 框架={result['framework_info']['framework_name']}, "
+                   f"任务块数={result['task_blocks_count']}")
+        
+        return ResponseModel.ok(data=result)
+        
+    except Exception as e:
+        logger.error(f"获取数据中心操作日志失败: {e}")
+        return ResponseModel.error(msg=f"获取操作日志失败: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class UploadFolderEnum(str, Enum):
     FACTORS = 'factors'  # 时序因子
     SECTIONS = 'sections'  # 截面因子
     POSITIONS = 'positions'  # 仓管策略
+    SIGNALS = 'signals'  # 择时因子
 
 
 class AccountTypeEnum(str, Enum):

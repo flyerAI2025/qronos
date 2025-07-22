@@ -1,5 +1,7 @@
 import ast
 import json
+import shutil
+import traceback
 from enum import Enum
 from pathlib import Path
 
@@ -70,7 +72,7 @@ def process_framework_account_statistics(framework_status):
             # 检查账户信息目录
             account_info_path = data_path / account_name / '账户信息'
             if not account_info_path.exists():
-                logger.warning(f'{account_name} 没有生成 [账户信息] 目录，该账户当前下单过····')
+                logger.warning(f'{account_name} 没有生成 [账户信息] 目录，该账户当前未下过单····')
                 continue
             
             # 处理资金曲线数据
@@ -152,7 +154,16 @@ def process_framework_account_statistics(framework_status):
                                 pos_swap_list[timestamp_key] = df.reset_index().to_dict('records')
                         account_info['pos_swap'] = pos_swap_list
                 except Exception as e:
-                    logger.error(f"处理 {account_name} 合约持仓数据失败: {e}")
+                    logger.error(f"处理 {account_name} 合约持仓数据失败: {e}, {traceback.format_exc()}")
+
+            # 处理持仓盈亏数据
+            pnl_history_path = account_info_path / 'pnl_history.pkl'
+            if pnl_history_path.exists():
+                try:
+                    pnl_history = pd.read_pickle(pnl_history_path)
+                    account_info['pnl_history'] = pnl_history if pnl_history else {}
+                except Exception as e:
+                    logger.error(f"处理  {account_name} 持仓盈亏数据失败: {e}, {traceback.format_exc()}")
 
             result.append(account_info)
             logger.debug(f"成功处理账户: {account_name}")
@@ -338,7 +349,7 @@ def generate_account_py_file_from_json(account_name: str, account_json: dict, ac
     strategy_fields = ['strategy_name', 'strategy_config', 'strategy_pool', 'rebalance_mode']
 
     # AccountModel 相关字段：允许更新
-    account_fields = ['account_config', 'get_kline_num', 'leverage', 'black_list', 'white_list']
+    account_fields = ['account_config', 'get_kline_num', 'leverage', 'black_list', 'white_list', 'min_kline_num']
 
     # 生成 Python 文件内容
     py_content = f"""# ====================================================================================================
@@ -356,6 +367,7 @@ account_config = {python_repr(get_field_value('account_config', {}, account_json
 # ====================================================================================================
 strategy_name = {python_repr(get_field_value('strategy_name', account_name, account_json, existing_data, strategy_fields, account_fields))}  # 当前账户运行策略的名称
 get_kline_num = {python_repr(get_field_value('get_kline_num', 999, account_json, existing_data, strategy_fields, account_fields))}  # 获取多少根K线
+min_kline_num = {python_repr(get_field_value('min_kline_num', 168, account_json, existing_data, strategy_fields, account_fields))}  # 最小k线数量
 strategy_config = {python_repr(get_field_value('strategy_config', {}, account_json, existing_data, strategy_fields, account_fields))}  # 策略配置
 strategy_pool = {python_repr(get_field_value('strategy_pool', [], account_json, existing_data, strategy_fields, account_fields))}  # 策略池
 leverage = {python_repr(get_field_value('leverage', 1, account_json, existing_data, strategy_fields, account_fields))}  # 杠杆数
@@ -772,3 +784,267 @@ def extract_variables_from_py(content: str, key_map: dict):
             result[k] = None
 
     return result, None
+
+
+def migrate_framework_data(raw_framework_status, target_framework_status):
+    """
+    框架数据迁移核心逻辑
+    
+    将源框架的账户配置和数据迁移到目标框架。
+    包括账户配置文件（.json 和 .py）以及对应的用户数据目录。
+    
+    Args:
+        raw_framework_status: 源框架状态对象
+        target_framework_status: 目标框架状态对象
+        
+    Returns:
+        tuple: (success: bool, result: dict, error_msg: str)
+    """
+    logger.info(f"开始框架数据迁移: {raw_framework_status.framework_name} -> {target_framework_status.framework_name}")
+    
+    try:
+        # 获取框架路径
+        raw_framework_path = Path(raw_framework_status.path)
+        target_framework_path = Path(target_framework_status.path)
+        
+        logger.info(f"源框架路径: {raw_framework_path}")
+        logger.info(f"目标框架路径: {target_framework_path}")
+        
+        # 检查源框架的accounts目录是否存在
+        raw_accounts_dir = raw_framework_path / 'accounts'
+        if not raw_accounts_dir.exists():
+            error_msg = f'源框架 {raw_framework_status.framework_id} 的accounts目录不存在'
+            logger.warning(error_msg)
+            return False, None, error_msg
+
+        raw_config_path = raw_framework_path / 'config.json'
+        target_config_path = target_framework_path / 'config.json'
+        if raw_config_path.exists():
+            config_json = json.loads(raw_config_path.read_text(encoding='utf-8'))
+            config_json['framework_id'] = target_framework_status.framework_id
+            target_config_path.write_text(
+                json.dumps(config_json, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+            logger.info(f'已迁移框架配置文件 config.json')
+
+        # 确保目标框架的accounts目录存在
+        target_accounts_dir = target_framework_path / 'accounts'
+        target_accounts_dir.mkdir(exist_ok=True)
+        
+        # 迁移账户配置文件
+        migrated_users = []
+        failed_users = []
+        
+        # 获取源框架中所有的JSON账户配置文件
+        json_files = [file for file in raw_accounts_dir.iterdir() 
+                     if file.is_file() and file.suffix == ".json" and not file.name.startswith('_')]
+        
+        logger.info(f"找到 {len(json_files)} 个账户配置文件需要迁移")
+        
+        if len(json_files) == 0:
+            error_msg = f'源框架 {raw_framework_status.framework_id} 中没有找到有效的账户配置文件'
+            logger.warning(error_msg)
+            return False, None, error_msg
+        
+        for json_file in json_files:
+            account_name = json_file.stem
+            logger.info(f"开始迁移账户: {account_name}")
+            
+            try:
+                # 读取并更新JSON配置文件中的framework_id
+                account_json = json.loads(json_file.read_text(encoding='utf-8'))
+                
+                # 更新framework_id为目标框架ID
+                old_framework_id = account_json.get('framework_id')
+                account_json['framework_id'] = target_framework_status.framework_id
+                logger.info(f"更新账户配置中的framework_id: {old_framework_id} -> {target_framework_status.framework_id}")
+                
+                # 保存更新后的JSON配置文件到目标位置
+                target_json_file = target_accounts_dir / json_file.name
+                target_json_file.write_text(
+                    json.dumps(account_json, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                logger.info(f"已迁移并更新JSON配置文件: {json_file.name}")
+                
+                # 查找对应的Python配置文件（正常和锁定状态）
+                normal_py_file = raw_accounts_dir / f"{account_name}.py"
+                locked_py_file = raw_accounts_dir / f"_{account_name}.py"
+                
+                py_files_migrated = []
+                if normal_py_file.exists():
+                    target_py_file = target_accounts_dir / normal_py_file.name
+                    shutil.copy2(normal_py_file, target_py_file)
+                    py_files_migrated.append(normal_py_file.name)
+                    logger.info(f"已迁移Python配置文件: {normal_py_file.name}")
+                
+                if locked_py_file.exists():
+                    target_locked_py_file = target_accounts_dir / locked_py_file.name
+                    shutil.copy2(locked_py_file, target_locked_py_file)
+                    py_files_migrated.append(locked_py_file.name)
+                    logger.info(f"已迁移锁定Python配置文件: {locked_py_file.name}")
+                
+                # 迁移用户数据目录
+                data_migrated = _migrate_user_data(
+                    raw_framework_path, target_framework_path, account_name
+                )
+                
+                # 迁移snapshot数据
+                snapshot_migrated = _migrate_snapshot_data(
+                    raw_framework_path, target_framework_path, account_name
+                )
+                
+                migrated_users.append({
+                    'account_name': account_name,
+                    'json_file': json_file.name,
+                    'py_files': py_files_migrated,
+                    'data_migrated': data_migrated,
+                    'snapshot_migrated': snapshot_migrated,
+                    'framework_id_updated': {
+                        'old': old_framework_id,
+                        'new': target_framework_status.framework_id
+                    }
+                })
+                
+                logger.info(f"账户 {account_name} 迁移成功")
+                
+            except Exception as e:
+                logger.error(f"迁移账户 {account_name} 失败: {e}")
+                failed_users.append({
+                    'account_name': account_name,
+                    'error': str(e)
+                })
+        
+        # 生成迁移报告
+        migration_report = {
+            'source_framework': {
+                'id': raw_framework_status.framework_id,
+                'name': raw_framework_status.framework_name,
+                'path': str(raw_framework_path)
+            },
+            'target_framework': {
+                'id': target_framework_status.framework_id,
+                'name': target_framework_status.framework_name,
+                'path': str(target_framework_path)
+            },
+            'migration_summary': {
+                'total_accounts': len(json_files),
+                'migrated_successfully': len(migrated_users),
+                'failed_migrations': len(failed_users)
+            },
+            'migrated_accounts': migrated_users,
+            'failed_accounts': failed_users
+        }
+        
+        logger.info(f"数据迁移完成: 成功迁移 {len(migrated_users)} 个账户，失败 {len(failed_users)} 个账户")
+        
+        success = len(failed_users) == 0
+        error_msg = None if success else f"有 {len(failed_users)} 个账户迁移失败"
+        
+        return success, migration_report, error_msg
+    
+    except Exception as e:
+        logger.error(f"数据迁移过程中发生异常: {e}")
+        return False, None, f"数据迁移失败: {str(e)}"
+
+
+def _migrate_user_data(raw_framework_path, target_framework_path, account_name):
+    """
+    迁移用户数据目录
+    
+    Args:
+        raw_framework_path: 源框架路径
+        target_framework_path: 目标框架路径
+        account_name: 账户名称
+        
+    Returns:
+        bool: 是否成功迁移用户数据
+    """
+    try:
+        raw_data_dir = raw_framework_path / 'data'
+        target_data_dir = target_framework_path / 'data'
+        
+        if not raw_data_dir.exists():
+            logger.warning(f"源框架data目录不存在: {raw_data_dir}")
+            return False
+        
+        target_data_dir.mkdir(exist_ok=True)
+        
+        # 迁移用户名称对应的数据目录
+        user_data_dir = raw_data_dir / account_name
+        if user_data_dir.exists() and user_data_dir.is_dir():
+            target_user_data_dir = target_data_dir / account_name
+            
+            # 如果目标目录已存在，先删除
+            if target_user_data_dir.exists():
+                logger.warning(f"目标用户数据目录已存在，将被覆盖: {target_user_data_dir}")
+                shutil.rmtree(target_user_data_dir)
+            
+            # 复制整个用户数据目录
+            shutil.copytree(user_data_dir, target_user_data_dir)
+            logger.info(f"已迁移用户数据目录: {account_name}")
+            return True
+        else:
+            logger.warning(f"用户数据目录不存在，跳过: {user_data_dir}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"迁移用户数据目录失败 {account_name}: {e}")
+        return False
+
+
+def _migrate_snapshot_data(raw_framework_path, target_framework_path, account_name):
+    """
+    迁移snapshot数据
+    
+    Args:
+        raw_framework_path: 源框架路径
+        target_framework_path: 目标框架路径
+        account_name: 账户名称
+        
+    Returns:
+        list: 成功迁移的snapshot目录列表
+    """
+    migrated_snapshots = []
+    
+    try:
+        raw_data_dir = raw_framework_path / 'data'
+        target_data_dir = target_framework_path / 'data'
+        
+        raw_snapshot_dir = raw_data_dir / 'snapshot'
+        if not raw_snapshot_dir.exists():
+            logger.info(f"源框架snapshot目录不存在: {raw_snapshot_dir}")
+            return migrated_snapshots
+        
+        target_snapshot_dir = target_data_dir / 'snapshot'
+        target_snapshot_dir.mkdir(exist_ok=True)
+        
+        # 查找以账户名开头的snapshot目录
+        snapshot_prefix = f"{account_name}_"
+        snapshot_dirs = [d for d in raw_snapshot_dir.iterdir() 
+                        if d.is_dir() and d.name.startswith(snapshot_prefix)]
+        
+        for snapshot_dir in snapshot_dirs:
+            try:
+                target_snapshot_subdir = target_snapshot_dir / snapshot_dir.name
+                
+                # 如果目标目录已存在，先删除
+                if target_snapshot_subdir.exists():
+                    logger.warning(f"目标snapshot目录已存在，将被覆盖: {target_snapshot_subdir}")
+                    shutil.rmtree(target_snapshot_subdir)
+                
+                # 复制snapshot目录
+                shutil.copytree(snapshot_dir, target_snapshot_subdir)
+                migrated_snapshots.append(snapshot_dir.name)
+                logger.info(f"已迁移snapshot目录: {snapshot_dir.name}")
+                
+            except Exception as e:
+                logger.error(f"迁移snapshot目录失败 {snapshot_dir.name}: {e}")
+        
+        logger.info(f"账户 {account_name} 共迁移了 {len(migrated_snapshots)} 个snapshot目录")
+        
+    except Exception as e:
+        logger.error(f"迁移snapshot数据失败 {account_name}: {e}")
+    
+    return migrated_snapshots
