@@ -16,6 +16,26 @@
 
 ---
 
+## 📜 License / 许可证
+
+**English:**  
+This project is licensed under the **MIT Non-Commercial Attribution License (MIT-NC-Attr)**.  
+- ✅ Free for personal, educational, and research use.  
+- 🚫 Commercial use is prohibited without prior written permission.  
+- 📌 Forks or derivative works must include clear attribution and a link to the original repository.  
+
+See [LICENSE](./LICENSE) for full details.
+
+**中文说明:**  
+本项目采用 **MIT 非商业署名许可证 (MIT-NC-Attr)**。  
+- ✅ 允许个人、教育、研究等非商业用途免费使用。  
+- 🚫 未经书面许可，禁止任何商业用途。  
+- 📌 Fork 或衍生项目必须清晰标注原作者及项目地址，并附上原仓库链接。  
+
+完整条款请查看 [LICENSE](./LICENSE)。
+
+---
+
 # Qronos 量化交易框架管理系统
 
 > 🚀 专业的量化交易框架管理平台，支持多架构Docker部署
